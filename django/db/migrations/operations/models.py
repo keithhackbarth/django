@@ -286,6 +286,75 @@ class DeleteModel(ModelOperation):
         return 'delete_%s' % self.name_lower
 
 
+class MoveModel(ModelOperation):
+    """Move a model between apps."""
+
+    def __init__(self, model_name, old_app, new_app):
+        self.model_name = model_name
+        self.old_app = old_app
+        self.new_app = new_app
+        super().__init__(model_name)
+
+    def deconstruct(self):
+        kwargs = {
+            'old_app': self.old_app,
+            'new_app': self.new_app,
+        }
+        return (
+            self.__class__.__qualname__,
+            [],
+            kwargs
+        )
+
+    def state_forwards(self, app_label, state):
+
+        # Add a new model.
+        renamed_model = state.models[self.old_app, self.name_lower].clone()
+        renamed_model.app_label = self.new_app
+        state.models[self.new_app, self.name_lower] = renamed_model
+
+        # Ensure
+        breakpoint()
+        if state.models[self.old_app, self.name_lower].db_table != renamed_model.db_table:
+            raise ValueError(
+                "db_table has to be explicitly declare in order to move models between apps"
+            )
+
+        # Repoint all fields pointing to the old model to the new one.
+        old_model_tuple = (self.old_app, self.name_lower)
+        new_remote_model = '%s.%s' % (self.new_app, self.name_lower)
+        to_reload = set()
+        for model_state, name, field, reference in get_references(state, old_model_tuple):
+            changed_field = None
+            if reference.to:
+                changed_field = field.clone()
+                changed_field.remote_field.model = new_remote_model
+            if reference.through:
+                if changed_field is None:
+                    changed_field = field.clone()
+                changed_field.remote_field.through = new_remote_model
+            if changed_field:
+                model_state.fields[name] = changed_field
+                to_reload.add((model_state.app_label, model_state.name_lower))
+        # Reload models related to old model before removing the old model.
+        state.reload_models(to_reload, delay=True)
+        # Remove the old model.
+        state.remove_model(self.old_app, self.name_lower)
+        state.reload_model(self.new_app, self.name_lower, delay=True)
+
+    def references_model(self, name, app_label):
+        # The deleted model could be referencing the specified model through
+        # related fields.
+        return True
+
+    def describe(self):
+        return "Move model %s from %s to %s" % (self.name, self.old_app, self.new_app)
+
+    @property
+    def migration_name_fragment(self):
+        return 'move_%s_from_%s_to_%s' % (self.name_lower, self.old_app, self.new_app)
+
+
 class RenameModel(ModelOperation):
     """Rename a model."""
 

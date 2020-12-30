@@ -595,6 +595,60 @@ class OperationTests(OperationTestBase):
         self.assertTableExists('test_dlmtimo_shetlandpony')
         self.assertColumnExists('test_dlmtimo_shetlandpony', 'pony_ptr_id')
 
+    def test_move_model(self):
+        """
+        Tests the MoveModel operation.
+        """
+        old_project_state = self.set_up_test_model("test_momo_old", second_model=True, db_table='test_momo_stable')
+        new_project_state = self.set_up_test_model("test_momo_new", second_model=False)
+
+        # Test the state alteration
+        operation = migrations.MoveModel("Stable", "test_momo_old", "test_momo_new")
+        self.assertEqual(operation.describe(), "Move model Stable from test_momo_old to test_momo_new")
+        self.assertEqual(operation.migration_name_fragment, 'move_stable_from_test_momo_old_to_test_momo_new')
+
+        # Test initial state and database
+        self.assertIn(("test_momo_old", "stable"), old_project_state.models)
+        self.assertNotIn(("test_momo_new", "stable"), new_project_state.models)
+        self.assertTableExists("test_momo_stable")
+
+        # Migrate forwards
+        new_state = old_project_state.clone()
+        atomic_rename = connection.features.supports_atomic_references_rename
+        new_state = self.apply_operations("test_momo", new_state, [operation], atomic=atomic_rename)
+        # Test new state and database
+        self.assertNotIn(("test_momo", "pony"), new_state.models)
+        self.assertIn(("test_momo", "horse"), new_state.models)
+        # RenameModel also repoints all incoming FKs and M2Ms
+        self.assertEqual(
+            new_state.models['test_momo', 'rider'].fields['pony'].remote_field.model,
+            'test_momo.Horse',
+        )
+        self.assertTableNotExists("test_momo_pony")
+        self.assertTableExists("test_momo_horse")
+        if connection.features.supports_foreign_keys:
+            self.assertFKNotExists("test_momo_rider", ["pony_id"], ("test_momo_pony", "id"))
+            self.assertFKExists("test_momo_rider", ["pony_id"], ("test_momo_horse", "id"))
+        # Migrate backwards
+        original_state = self.unapply_operations("test_momo", project_state, [operation], atomic=atomic_rename)
+        # Test original state and database
+        self.assertIn(("test_momo", "pony"), original_state.models)
+        self.assertNotIn(("test_momo", "horse"), original_state.models)
+        self.assertEqual(
+            original_state.models['test_momo', 'rider'].fields['pony'].remote_field.model,
+            'Pony',
+        )
+        self.assertTableExists("test_momo_pony")
+        self.assertTableNotExists("test_momo_horse")
+        if connection.features.supports_foreign_keys:
+            self.assertFKExists("test_momo_rider", ["pony_id"], ("test_momo_pony", "id"))
+            self.assertFKNotExists("test_momo_rider", ["pony_id"], ("test_momo_horse", "id"))
+        # And deconstruction
+        definition = operation.deconstruct()
+        self.assertEqual(definition[0], "RenameModel")
+        self.assertEqual(definition[1], [])
+        self.assertEqual(definition[2], {'old_name': "Pony", 'new_name': "Horse"})
+
     def test_rename_model(self):
         """
         Tests the RenameModel operation.
